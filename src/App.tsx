@@ -77,18 +77,43 @@ const fetchWithClearError = async (url, options) => {
 
 const callGeminiText = async (payload, activeKey) => {
   if (!activeKey) throw new Error("API Key kosong. Silakan isi kolom Kunci AI di panel kiri.");
-  let url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${activeKey}`;
   
-  try {
-    return await fetchWithClearError(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-  } catch (error) {
-    if (error.message.includes('404') || error.message.includes('403')) {
-      console.warn("Mencoba fallback ke model gemini-1.5-flash...");
-      url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${activeKey}`;
-      return await fetchWithClearError(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+  // Array berisi semua kemungkinan nama model dari Google
+  const modelsToTry = [
+    'gemini-1.5-flash-latest',
+    'gemini-1.5-pro-latest',
+    'gemini-1.5-flash',
+    'gemini-pro'
+  ];
+
+  let lastError;
+  for (const model of modelsToTry) {
+    try {
+      // Duplikat payload agar aman dimodifikasi
+      let finalPayload = JSON.parse(JSON.stringify(payload)); 
+      
+      // Khusus gemini-pro lawas, format instruksinya harus digabung
+      if (model === 'gemini-pro' && finalPayload.systemInstruction) {
+         const sysText = finalPayload.systemInstruction.parts[0].text;
+         const userText = finalPayload.contents[0].parts[0].text;
+         finalPayload.contents = [{ parts: [{ text: "System:\n" + sysText + "\n\nUser:\n" + userText }] }];
+         delete finalPayload.systemInstruction;
+      }
+
+      let url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${activeKey}`;
+      return await fetchWithClearError(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(finalPayload) });
+    } catch (error) {
+      lastError = error;
+      // Jika model ditolak, tangkap errornya dan lanjut coba model berikutnya
+      if (error.message.includes('404') || error.message.includes('403') || error.message.includes('400')) {
+        console.warn(`Model ${model} ditolak, mencoba model berikutnya...`);
+        continue;
+      }
+      throw error;
     }
-    throw error;
   }
+  // Jika semua daftar di atas masih gagal
+  throw lastError || new Error("Semua model API gagal diakses.");
 };
 
 const compressImageForStorage = (base64Str, maxWidth = 600, quality = 0.6) => {
