@@ -63,7 +63,6 @@ const validateApiKey = (key) => {
   if (!cleanKey) {
     throw new Error("Kunci AI (API Key) kosong. Silakan isi kotak di sebelah kiri.");
   }
-  // Menghapus validasi strict 'AIza' agar kunci 'AQ...' bisa masuk ke server Google
   return cleanKey;
 };
 
@@ -91,11 +90,18 @@ const callGeminiText = async (payload, activeKey) => {
   const modelName = 'gemini-1.5-flash';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${validKey}`;
   
-  return await fetchWithClearError(url, { 
-    method: 'POST', 
-    headers: { 'Content-Type': 'application/json' }, 
-    body: JSON.stringify(payload) 
-  });
+  try {
+    return await fetchWithClearError(url, { 
+      method: 'POST', 
+      headers: { 'Content-Type': 'application/json' }, 
+      body: JSON.stringify(payload) 
+    });
+  } catch (error) {
+    if (error.message.includes('404')) {
+      throw new Error(`⚠️ ERROR 404: AKSES MODEL DITOLAK GOOGLE\n\nKunci API Anda asli dan terhubung, TAPI Proyek Google Anda belum mengaktifkan model Gemini.\n\nSOLUSI (Sangat Mudah & Gratis):\n1. Buka kembali: aistudio.google.com/app/apikey\n2. Klik tombol biru "Create API key".\n3. WAJIB KLIK pilihan "Create API key in new project" (tombol paling atas).\n4. Jangan pilih proyek yang sudah ada di daftar bawahnya.\n5. Salin kunci baru tersebut, tempel ke kotak di sebelah kiri, dan klik Generate!`);
+    }
+    throw error;
+  }
 };
 
 const compressImageForStorage = (base64Str, maxWidth = 600, quality = 0.6) => {
@@ -230,6 +236,9 @@ const generateAudioContent = async (text, voiceStyle, activeKey) => {
     }
     throw new Error("Format audio tidak valid dari API");
   } catch (error) {
+     if (error.message.includes('404')) {
+       throw new Error(`⚠️ ERROR 404: Proyek Google Cloud Anda belum memiliki akses API. Silakan buat kunci baru dengan memilih "Create API key in new project".`);
+     }
      console.warn("API Suara gagal, menggunakan browser fallback.", error);
      throw error;
   }
@@ -1406,7 +1415,7 @@ export default function App() {
             {error && (
               <div className="mt-4 p-3 bg-red-900/30 border border-red-800 text-red-300 rounded text-sm break-words whitespace-pre-wrap leading-relaxed">
                 {/* Error Box is now styled nicely to show validation messages */}
-                {error.includes("API KEY SALAH FORMAT") ? (
+                {error.includes("ERROR 404") ? (
                   <div className="flex flex-col gap-2" dangerouslySetInnerHTML={{ __html: error.replace(/\n/g, '<br/>') }} />
                 ) : (
                   <><strong className="block mb-1">Terjadi Kesalahan:</strong>{error}</>
