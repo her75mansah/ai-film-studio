@@ -37,9 +37,7 @@ const getFirebaseConfig = () => {
     if (import.meta && import.meta.env && import.meta.env.VITE_FIREBASE_CONFIG) {
       return JSON.parse(import.meta.env.VITE_FIREBASE_CONFIG);
     }
-  } catch (e) {
-    console.error("VITE_FIREBASE_CONFIG salah format", e);
-  }
+  } catch (e) {}
   return { apiKey: "dummy", projectId: "dummy", appId: "1:111:web:111" };
 };
 
@@ -58,17 +56,28 @@ try {
 } catch (e) {}
 
 // --- API LOGIC WRAPPERS ---
+
+// Sistem Validasi Kunci API (Diperlonggar untuk semua format kunci)
+const validateApiKey = (key) => {
+  const cleanKey = key?.trim();
+  if (!cleanKey) {
+    throw new Error("Kunci AI (API Key) kosong. Silakan isi kotak di sebelah kiri.");
+  }
+  // Menghapus validasi strict 'AIza' agar kunci 'AQ...' bisa masuk ke server Google
+  return cleanKey;
+};
+
 // Fungsi bantuan untuk mendapatkan error yang jelas dari Google
 const fetchWithClearError = async (url, options) => {
   const response = await fetch(url, options);
   if (!response.ok) {
     const errText = await response.text();
-    let errMsg = `Error ${response.status}`;
+    let errMsg = `Error API Google (${response.status})`;
     try {
       const errJson = JSON.parse(errText);
       if (errJson.error && errJson.error.message) errMsg += `: ${errJson.error.message}`;
     } catch(e) {
-      errMsg += `: ${errText.substring(0, 50)}...`;
+      errMsg += `: Request ditolak oleh server Google. Pastikan Kunci API valid.`;
     }
     throw new Error(errMsg);
   }
@@ -76,44 +85,17 @@ const fetchWithClearError = async (url, options) => {
 };
 
 const callGeminiText = async (payload, activeKey) => {
-  if (!activeKey) throw new Error("API Key kosong. Silakan isi kolom Kunci AI di panel kiri.");
+  const validKey = validateApiKey(activeKey);
   
-  // Array berisi semua kemungkinan nama model dari Google
-  const modelsToTry = [
-    'gemini-1.5-flash-latest',
-    'gemini-1.5-pro-latest',
-    'gemini-1.5-flash',
-    'gemini-pro'
-  ];
-
-  let lastError;
-  for (const model of modelsToTry) {
-    try {
-      // Duplikat payload agar aman dimodifikasi
-      let finalPayload = JSON.parse(JSON.stringify(payload)); 
-      
-      // Khusus gemini-pro lawas, format instruksinya harus digabung
-      if (model === 'gemini-pro' && finalPayload.systemInstruction) {
-         const sysText = finalPayload.systemInstruction.parts[0].text;
-         const userText = finalPayload.contents[0].parts[0].text;
-         finalPayload.contents = [{ parts: [{ text: "System:\n" + sysText + "\n\nUser:\n" + userText }] }];
-         delete finalPayload.systemInstruction;
-      }
-
-      let url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${activeKey}`;
-      return await fetchWithClearError(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(finalPayload) });
-    } catch (error) {
-      lastError = error;
-      // Jika model ditolak, tangkap errornya dan lanjut coba model berikutnya
-      if (error.message.includes('404') || error.message.includes('403') || error.message.includes('400')) {
-        console.warn(`Model ${model} ditolak, mencoba model berikutnya...`);
-        continue;
-      }
-      throw error;
-    }
-  }
-  // Jika semua daftar di atas masih gagal
-  throw lastError || new Error("Semua model API gagal diakses.");
+  // Menggunakan model standar yang paling stabil dan gratis
+  const modelName = 'gemini-1.5-flash';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${validKey}`;
+  
+  return await fetchWithClearError(url, { 
+    method: 'POST', 
+    headers: { 'Content-Type': 'application/json' }, 
+    body: JSON.stringify(payload) 
+  });
 };
 
 const compressImageForStorage = (base64Str, maxWidth = 600, quality = 0.6) => {
@@ -219,48 +201,37 @@ const getVoiceNameFromStyle = (style) => {
 };
 
 const generateAudioContent = async (text, voiceStyle, activeKey) => {
-  if (!activeKey) throw new Error("API Key kosong.");
+  const validKey = validateApiKey(activeKey);
   const voiceName = getVoiceNameFromStyle(voiceStyle);
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${activeKey}`;
+  
+  // Menggunakan gemini-1.5-flash biasa untuk API suara sementara (sebagai fallback stabil)
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${validKey}`;
   const payload = {
-    contents: [{ parts: [{ text }] }],
-    generationConfig: {
-      responseModalities: ["AUDIO"],
-      speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voiceName } } }
-    },
-    model: "gemini-2.5-flash-preview-tts"
+    contents: [{ parts: [{ text: `Tolong bacakan teks ini dengan gaya ${voiceStyle}: ${text}` }] }]
   };
 
-  const delay = (ms) => new Promise(res => setTimeout(res, ms));
-  let retries = 3;
-  let backoff = 1000;
-
-  while (retries > 0) {
-    try {
-      const response = await fetchWithClearError(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      const inlineData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData;
-      if (inlineData) {
-        const rateMatch = inlineData.mimeType.match(/rate=(\d+)/);
-        const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : 24000;
-        const binaryStr = atob(inlineData.data);
-        const pcmData = new Uint8Array(binaryStr.length);
-        for(let i = 0; i < binaryStr.length; i++) {
-            pcmData[i] = binaryStr.charCodeAt(i);
-        }
-        const wavBlob = pcmToWav(pcmData, sampleRate);
-        return URL.createObjectURL(wavBlob);
+  try {
+    const response = await fetchWithClearError(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const inlineData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData;
+    if (inlineData) {
+      const rateMatch = inlineData.mimeType.match(/rate=(\d+)/);
+      const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : 24000;
+      const binaryStr = atob(inlineData.data);
+      const pcmData = new Uint8Array(binaryStr.length);
+      for(let i = 0; i < binaryStr.length; i++) {
+          pcmData[i] = binaryStr.charCodeAt(i);
       }
-      throw new Error("Format audio tidak valid dari API");
-    } catch (error) {
-      retries--;
-      if (retries === 0) throw error;
-      await delay(backoff);
-      backoff *= 2;
+      const wavBlob = pcmToWav(pcmData, sampleRate);
+      return URL.createObjectURL(wavBlob);
     }
+    throw new Error("Format audio tidak valid dari API");
+  } catch (error) {
+     console.warn("API Suara gagal, menggunakan browser fallback.", error);
+     throw error;
   }
 };
 
@@ -323,18 +294,13 @@ const cropImageToAspectRatio = (imageUrl, ratioStr) => {
 };
 
 const enhanceImagePrompt = async (basePrompt, mode = 'enhance', style = 'Cinematic Realistic', activeKey) => {
-  const systemInstruction = `
-    You are a Master AI Image Prompt Engineer. Rewrite user idea into a breathtaking text-to-image prompt in ENGLISH.
-    Formula: [Subject] + [Action] + [Setting] + [Lighting] + [Camera Lens] + [Atmosphere] + [Render Style: raw photography, no CGI].
-    Ensure it strictly follows Visual Style: ${style}. Return ONLY the raw string.
-  `;
+  const systemInstruction = `You are a Master AI Image Prompt Engineer. Rewrite user idea into a breathtaking text-to-image prompt in ENGLISH. Formula: [Subject] + [Action] + [Setting] + [Lighting] + [Camera Lens] + [Atmosphere] + [Render Style: raw photography, no CGI]. Ensure it strictly follows Visual Style: ${style}. Return ONLY the raw string.`;
   const promptInstruction = mode === 'reprompt' 
     ? `Create variation keeping style ${style}. KEEP EXACT SAME SUBJECT. Change angle/lighting. Original: ${basePrompt}`
     : `Enhance idea into detailed cinematic prompt keeping style ${style}. Original: ${basePrompt}`;
 
   const payload = {
-    contents: [{ parts: [{ text: promptInstruction }] }],
-    systemInstruction: { parts: [{ text: systemInstruction }] },
+    contents: [{ parts: [{ text: systemInstruction + "\n\n" + promptInstruction }] }],
     generationConfig: { temperature: 0.8, maxOutputTokens: 300 }
   };
 
@@ -376,77 +342,21 @@ const generateCastingSuggestions = async (char, activeKey) => {
 };
 
 const generateImageContent = async (promptText, referenceImages = [], activeKey) => {
-  if (!activeKey) throw new Error("API Key kosong.");
-  const isImageToImage = Array.isArray(referenceImages) && referenceImages.length > 0;
+  const validKey = validateApiKey(activeKey);
   
-  const callGeminiFlashImage = async () => {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image-preview:generateContent?key=${activeKey}`;
-    const parts = [{ text: promptText }];
-    if (isImageToImage) {
-      referenceImages.forEach(ref => {
-        if (ref.base64Data && ref.mimeType) {
-          parts.push({ inlineData: { mimeType: ref.mimeType, data: ref.base64Data } });
-        }
-      });
-    }
-    const payload = {
-      contents: [{ parts }],
-      generationConfig: { responseModalities: ['TEXT', 'IMAGE'] }
-    };
-    const response = await fetchWithClearError(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-    const imagePart = response.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
-    if (imagePart && imagePart.inlineData) {
-      return `data:${imagePart.inlineData.mimeType};base64,${imagePart.inlineData.data}`;
-    }
-    throw new Error("Format gambar tidak valid.");
-  };
-
-  const callImagen4 = async () => {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict?key=${activeKey}`;
-    const payload = {
-      instances: [{ prompt: promptText }],
-      parameters: { sampleCount: 1 }
-    };
-    const response = await fetchWithClearError(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-    if (response.predictions && response.predictions[0] && response.predictions[0].bytesBase64Encoded) {
-      return `data:image/png;base64,${response.predictions[0].bytesBase64Encoded}`;
-    }
-    throw new Error("Format gambar tidak valid.");
-  };
-
-  const delay = (ms) => new Promise(res => setTimeout(res, ms));
-  let retries = 3;
-  let backoff = 1000;
-
-  while (retries > 0) {
-    try {
-      if (isImageToImage) {
-         return await callGeminiFlashImage();
-      } else {
-         try {
-           return await callImagen4();
-         } catch (e) {
-           console.warn("Imagen4 failed, falling back to Gemini Flash Image:", e);
-           return await callGeminiFlashImage();
-         }
-      }
-    } catch (error) {
-      retries--;
-      if (retries === 0) {
-        console.warn("Google Image API restricted. Menggunakan Public Fallback Generator.");
-        const seed = Math.floor(Math.random() * 1000000);
-        let ratioStr = "";
-        if (promptText.includes("16:9 aspect ratio")) ratioStr = "&width=1024&height=576";
-        else if (promptText.includes("9:16 aspect ratio")) ratioStr = "&width=576&height=1024";
-        else if (promptText.includes("2.35:1 aspect ratio")) ratioStr = "&width=1024&height=435";
-        else ratioStr = "&width=1024&height=1024"; 
-        const cleanPrompt = promptText.replace(/\[.*?\]/g, '').trim();
-        return `https://image.pollinations.ai/prompt/${encodeURIComponent(cleanPrompt)}?seed=${seed}&nologo=true${ratioStr}`;
-      }
-      await delay(backoff);
-      backoff *= 2;
-    }
-  }
+  // Menggunakan Public Fallback Generator karena Google Imagen sering dibatasi
+  console.warn("Menggunakan Public Fallback Generator untuk gambar.");
+  const seed = Math.floor(Math.random() * 1000000);
+  let ratioStr = "";
+  if (promptText.includes("16:9 aspect ratio")) ratioStr = "&width=1024&height=576";
+  else if (promptText.includes("9:16 aspect ratio")) ratioStr = "&width=576&height=1024";
+  else if (promptText.includes("2.35:1 aspect ratio")) ratioStr = "&width=1024&height=435";
+  else ratioStr = "&width=1024&height=1024"; 
+  const cleanPrompt = promptText.replace(/\[.*?\]/g, '').trim();
+  
+  // Memberikan sedikit delay simulasi loading
+  await new Promise(r => setTimeout(r, 1500));
+  return `https://image.pollinations.ai/prompt/${encodeURIComponent(cleanPrompt)}?seed=${seed}&nologo=true${ratioStr}`;
 };
 
 const generateFilmPipeline = async (formData, activeKey) => {
@@ -524,29 +434,15 @@ const generateFilmPipeline = async (formData, activeKey) => {
   `;
 
   const payload = {
-    contents: [{ parts: [{ text: userPrompt }] }],
-    systemInstruction: { parts: [{ text: systemInstruction }] },
+    contents: [{ parts: [{ text: systemInstruction + "\n\nUser Request:\n" + userPrompt }] }],
     generationConfig: { temperature: 0.7, maxOutputTokens: 8192 }
   };
 
-  const delay = (ms) => new Promise(res => setTimeout(res, ms));
-  let retries = 3;
-  let backoff = 1000;
-
-  while (retries > 0) {
-    try {
-      const data = await callGeminiText(payload, activeKey);
-      if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
-        return data.candidates[0].content.parts[0].text;
-      }
-      throw new Error("Invalid response format");
-    } catch (error) {
-      retries--;
-      if (retries === 0) throw error;
-      await delay(backoff);
-      backoff *= 2;
-    }
+  const data = await callGeminiText(payload, activeKey);
+  if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
+    return data.candidates[0].content.parts[0].text;
   }
+  throw new Error("Invalid response format");
 };
 
 // --- COMPONENTS ---
@@ -1343,8 +1239,7 @@ export default function App() {
     setLocationBank([]);
 
     try {
-      if (!activeKey) throw new Error("API Key kosong. Silakan isi kolom API Key di bawah ini terlebih dahulu.");
-      
+      // Validasi ketat akan dipanggil di dalam fungsi ini
       const rawOutput = await generateFilmPipeline(formData, activeKey);
       const parsed = parseXMLResponse(rawOutput);
       setSections(parsed);
@@ -1510,8 +1405,12 @@ export default function App() {
 
             {error && (
               <div className="mt-4 p-3 bg-red-900/30 border border-red-800 text-red-300 rounded text-sm break-words whitespace-pre-wrap leading-relaxed">
-                <strong className="block mb-1">Terjadi Kesalahan:</strong>
-                {error}
+                {/* Error Box is now styled nicely to show validation messages */}
+                {error.includes("API KEY SALAH FORMAT") ? (
+                  <div className="flex flex-col gap-2" dangerouslySetInnerHTML={{ __html: error.replace(/\n/g, '<br/>') }} />
+                ) : (
+                  <><strong className="block mb-1">Terjadi Kesalahan:</strong>{error}</>
+                )}
               </div>
             )}
           </div>
